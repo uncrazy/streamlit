@@ -26,8 +26,10 @@ from typing import TYPE_CHECKING, Callable, Final
 from blinker import Signal
 
 from streamlit import config, runtime, util
+from streamlit.commands.navigation import _navigation
 from streamlit.errors import FragmentStorageKeyError
 from streamlit.logger import get_logger
+from streamlit.navigation.page import StreamlitPage
 from streamlit.proto.ClientState_pb2 import ClientState
 from streamlit.proto.ForwardMsg_pb2 import ForwardMsg
 from streamlit.runtime.metrics_util import (
@@ -427,19 +429,13 @@ class ScriptRunner:
                 # in a 404 should the user click on them.
                 runtime.get_instance().media_file_mgr.clear_session_refs()
 
-            self._pages_manager.set_script_intent(
-                rerun_data.page_script_hash, rerun_data.page_name
-            )
-            active_script = self._pages_manager.get_initial_active_script(
-                rerun_data.page_script_hash, rerun_data.page_name
-            )
-            main_page_info = self._pages_manager.get_main_page()
-
+            # self._pages_manager.set_script_intent(
+            #     rerun_data.page_script_hash, rerun_data.page_name
+            # )
             page_script_hash = (
-                active_script["page_script_hash"]
-                if active_script is not None
-                else main_page_info["page_script_hash"]
+                rerun_data.page_script_hash or self._pages_manager.main_script_hash
             )
+            is_mpa_v1 = self._pages_manager.mpa_version == 1
 
             ctx = self._get_script_run_ctx()
             # Clear widget state on page change. This normally happens implicitly
@@ -478,29 +474,20 @@ class ScriptRunner:
                 pages=self._pages_manager.get_pages(),
             )
 
+            page: StreamlitPage | None = None
             # Compile the script. Any errors thrown here will be surfaced
             # to the user via a modal dialog in the frontend, and won't result
             # in their previous script elements disappearing.
             try:
-                if active_script is not None:
-                    script_path = active_script["script_path"]
+                if is_mpa_v1:
+                    pages = self._pages_manager.get_pages()
+                    page = _navigation(
+                        [StreamlitPage(p["script_path"]) for p in pages.values()]
+                    )
                 else:
-                    # page must not be found
-                    script_path = main_page_info["script_path"]
+                    page = StreamlitPage(self._main_script_path)
 
-                    # At this point, we know that either
-                    #   * the script corresponding to the hash requested no longer
-                    #     exists, or
-                    #   * we were not able to find a script with the requested page
-                    #     name.
-                    # In both of these cases, we want to send a page_not_found
-                    # message to the frontend.
-                    msg = ForwardMsg()
-                    msg.page_not_found.page_name = rerun_data.page_name
-                    ctx.enqueue(msg)
-
-                code = self._script_cache.get_bytecode(script_path)
-
+                code = self._script_cache.get_bytecode(page._script_path)
             except Exception as ex:
                 # We got a compile error. Send an error event and bail immediately.
                 _LOGGER.debug("Fatal script error", exc_info=ex)
@@ -532,7 +519,10 @@ class ScriptRunner:
             # work correctly. The CodeHasher is scoped to
             # files contained in the directory of __main__.__file__, which we
             # assume is the main script directory.
-            module.__dict__["__file__"] = script_path
+            #
+            # We know the script path will be set because either the main script path
+            # is provided or a script from the pages folder is provided.
+            module.__dict__["__file__"] = page._script_path
 
             def code_to_exec(code=code, module=module, ctx=ctx, rerun_data=rerun_data):
                 with modified_sys_path(
@@ -636,6 +626,15 @@ class ScriptRunner:
                     # Always capture all exceptions since we want to make sure that
                     # the telemetry never causes any issues.
                     _LOGGER.debug("Failed to create page profile", exc_info=ex)
+
+            # Double check there's no pages.
+            if not ctx.pages_manager.was_page_found(
+                rerun_data.page_script_hash, rerun_data.page_name
+            ):
+                msg = ForwardMsg()
+                msg.page_not_found.page_name = rerun_data.page_name
+                ctx.enqueue(msg)
+
             self._on_script_finished(ctx, finished_event, premature_stop)
 
             # # Use _log_if_error() to make sure we never ever ever stop running the

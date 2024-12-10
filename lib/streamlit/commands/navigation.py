@@ -53,6 +53,122 @@ def send_page_not_found(ctx: ScriptRunContext):
     ctx.enqueue(msg)
 
 
+def _navigation(
+    pages: list[StreamlitPage] | dict[SectionHeader, list[StreamlitPage]],
+    *,
+    position: Literal["sidebar", "hidden"] = "sidebar",
+    expanded: bool = False,
+):
+    nav_sections = {"": pages} if isinstance(pages, list) else pages
+    page_list = pages_from_nav_sections(nav_sections)
+
+    if not page_list:
+        raise StreamlitAPIException(
+            "`st.navigation` must be called with at least one `st.Page`."
+        )
+
+    default_page = None
+    pagehash_to_pageinfo: dict[PageHash, PageInfo] = {}
+
+    # Get the default page.
+    for section_header in nav_sections:
+        for page in nav_sections[section_header]:
+            if page._default:
+                if default_page is not None:
+                    raise StreamlitAPIException(
+                        "Multiple Pages specified with `default=True`. "
+                        "At most one Page can be set to default."
+                    )
+                default_page = page
+
+    if default_page is None:
+        default_page = page_list[0]
+        default_page._default = True
+
+    ctx = get_script_run_ctx()
+    if not ctx:
+        # This should never run in Streamlit, but we want to make sure that
+        # the function always returns a page
+        default_page._can_be_called = True
+        return default_page
+
+    # Build the pagehash-to-pageinfo mapping.
+    for section_header in nav_sections:
+        for page in nav_sections[section_header]:
+            if isinstance(page._page, Path):
+                script_path = str(page._page)
+            else:
+                script_path = ""
+
+            script_hash = page._script_hash
+            if script_hash in pagehash_to_pageinfo:
+                # The page script hash is soley based on the url path
+                # So duplicate page script hashes are due to duplicate url paths
+                raise StreamlitAPIException(
+                    f"Multiple Pages specified with URL pathname {page.url_path}. "
+                    "URL pathnames must be unique. The url pathname may be "
+                    "inferred from the filename, callable name, or title."
+                )
+
+            pagehash_to_pageinfo[script_hash] = {
+                "page_script_hash": script_hash,
+                "page_name": page.title,
+                "icon": page.icon,
+                "script_path": script_path,
+                "url_pathname": page.url_path,
+            }
+
+    msg = ForwardMsg()
+    if position == "hidden":
+        msg.navigation.position = NavigationProto.Position.HIDDEN
+    elif config.get_option("client.showSidebarNavigation") is False:
+        msg.navigation.position = NavigationProto.Position.HIDDEN
+    else:
+        msg.navigation.position = NavigationProto.Position.SIDEBAR
+
+    msg.navigation.expanded = expanded
+    msg.navigation.sections[:] = nav_sections.keys()
+    for section_header in nav_sections:
+        for page in nav_sections[section_header]:
+            p = msg.navigation.app_pages.add()
+            p.page_script_hash = page._script_hash
+            p.page_name = page.title
+            p.icon = page.icon
+            p.is_default = page._default
+            p.section_header = section_header
+            p.url_pathname = page.url_path
+
+    # Inform our page manager about the set of pages we have
+    ctx.pages_manager.set_pages(pagehash_to_pageinfo)
+    found_page = ctx.pages_manager.get_page_script(
+        fallback_page_hash=default_page._script_hash
+    )
+
+    page_to_return = None
+    if found_page:
+        found_page_script_hash = found_page["page_script_hash"]
+        matching_pages = [
+            p for p in page_list if p._script_hash == found_page_script_hash
+        ]
+        if len(matching_pages) > 0:
+            page_to_return = matching_pages[0]
+
+    if not page_to_return:
+        send_page_not_found(ctx)
+        page_to_return = default_page
+
+    # Ordain the page that can be called
+    page_to_return._can_be_called = True
+    msg.navigation.page_script_hash = page_to_return._script_hash
+    # Set the current page script hash to the page that is going to be executed
+    ctx.set_mpa_v2_page(page_to_return._script_hash)
+
+    # This will either navigation or yield if the page is not found
+    ctx.enqueue(msg)
+
+    return page_to_return
+
+
 @gather_metrics("navigation")
 def navigation(
     pages: list[StreamlitPage] | dict[SectionHeader, list[StreamlitPage]],
@@ -217,111 +333,5 @@ def navigation(
     .. _st.Page: https://docs.streamlit.io/develop/api-reference/navigation/st.page
 
     """
-    nav_sections = {"": pages} if isinstance(pages, list) else pages
-    page_list = pages_from_nav_sections(nav_sections)
 
-    if not page_list:
-        raise StreamlitAPIException(
-            "`st.navigation` must be called with at least one `st.Page`."
-        )
-
-    default_page = None
-    pagehash_to_pageinfo: dict[PageHash, PageInfo] = {}
-
-    # Get the default page.
-    for section_header in nav_sections:
-        for page in nav_sections[section_header]:
-            if page._default:
-                if default_page is not None:
-                    raise StreamlitAPIException(
-                        "Multiple Pages specified with `default=True`. "
-                        "At most one Page can be set to default."
-                    )
-                default_page = page
-
-    if default_page is None:
-        default_page = page_list[0]
-        default_page._default = True
-
-    ctx = get_script_run_ctx()
-    if not ctx:
-        # This should never run in Streamlit, but we want to make sure that
-        # the function always returns a page
-        default_page._can_be_called = True
-        return default_page
-
-    # Build the pagehash-to-pageinfo mapping.
-    for section_header in nav_sections:
-        for page in nav_sections[section_header]:
-            if isinstance(page._page, Path):
-                script_path = str(page._page)
-            else:
-                script_path = ""
-
-            script_hash = page._script_hash
-            if script_hash in pagehash_to_pageinfo:
-                # The page script hash is soley based on the url path
-                # So duplicate page script hashes are due to duplicate url paths
-                raise StreamlitAPIException(
-                    f"Multiple Pages specified with URL pathname {page.url_path}. "
-                    "URL pathnames must be unique. The url pathname may be "
-                    "inferred from the filename, callable name, or title."
-                )
-
-            pagehash_to_pageinfo[script_hash] = {
-                "page_script_hash": script_hash,
-                "page_name": page.title,
-                "icon": page.icon,
-                "script_path": script_path,
-                "url_pathname": page.url_path,
-            }
-
-    msg = ForwardMsg()
-    if position == "hidden":
-        msg.navigation.position = NavigationProto.Position.HIDDEN
-    elif config.get_option("client.showSidebarNavigation") is False:
-        msg.navigation.position = NavigationProto.Position.HIDDEN
-    else:
-        msg.navigation.position = NavigationProto.Position.SIDEBAR
-
-    msg.navigation.expanded = expanded
-    msg.navigation.sections[:] = nav_sections.keys()
-    for section_header in nav_sections:
-        for page in nav_sections[section_header]:
-            p = msg.navigation.app_pages.add()
-            p.page_script_hash = page._script_hash
-            p.page_name = page.title
-            p.icon = page.icon
-            p.is_default = page._default
-            p.section_header = section_header
-            p.url_pathname = page.url_path
-
-    # Inform our page manager about the set of pages we have
-    ctx.pages_manager.set_pages(pagehash_to_pageinfo)
-    found_page = ctx.pages_manager.get_page_script(
-        fallback_page_hash=default_page._script_hash
-    )
-
-    page_to_return = None
-    if found_page:
-        found_page_script_hash = found_page["page_script_hash"]
-        matching_pages = [
-            p for p in page_list if p._script_hash == found_page_script_hash
-        ]
-        if len(matching_pages) > 0:
-            page_to_return = matching_pages[0]
-
-    if not page_to_return:
-        send_page_not_found(ctx)
-        page_to_return = default_page
-
-    # Ordain the page that can be called
-    page_to_return._can_be_called = True
-    msg.navigation.page_script_hash = page_to_return._script_hash
-    # Set the current page script hash to the page that is going to be executed
-    ctx.set_mpa_v2_page(page_to_return._script_hash)
-
-    # This will either navigation or yield if the page is not found
-    ctx.enqueue(msg)
-
-    return page_to_return
+    return _navigation(pages, position=position, expanded=expanded)

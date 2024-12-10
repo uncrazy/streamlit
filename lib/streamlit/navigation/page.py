@@ -177,6 +177,7 @@ class StreamlitPage:
         # Must appear before the return so all pages, even if running in bare Python,
         # have a _default property. This way we can always tell which script needs to run.
         self._default: bool = default
+        self.__script_path: str | None = None
 
         ctx = get_script_run_ctx()
         if not ctx:
@@ -192,6 +193,8 @@ class StreamlitPage:
                 raise StreamlitAPIException(
                     f"Unable to create Page. The file `{page.name}` could not be found."
                 )
+
+            self.__script_path = str(page)
 
         inferred_name = ""
         inferred_icon = ""
@@ -298,9 +301,7 @@ class StreamlitPage:
             else:
                 code = ctx.pages_manager.get_page_script_byte_code(str(self._page))
 
-                # We create a module named __page__ for this specific
-                # script. This is differentiate it from the `__main__` module
-                module = types.ModuleType("__page__")
+                module = types.ModuleType("__main__")
                 # We want __file__ to be the path to the script
                 module.__dict__["__file__"] = self._page
                 exec(code, module.__dict__)
@@ -308,3 +309,7 @@ class StreamlitPage:
     @property
     def _script_hash(self) -> str:
         return calc_md5(self._url_path)
+
+    @property
+    def _script_path(self) -> str:
+        return self.__script_path
