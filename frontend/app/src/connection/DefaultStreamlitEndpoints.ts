@@ -27,6 +27,8 @@ import {
   StreamlitEndpoints,
 } from "@streamlit/lib"
 
+import { getStaticConfig } from "./StaticConnection"
+
 interface Props {
   getServerUri: () => BaseUriParts | undefined
   csrfEnabled: boolean
@@ -70,14 +72,32 @@ export class DefaultStreamlitEndpoints implements StreamlitEndpoints {
   }
 
   /**
+   * If we are using a static connection, return S3 URL for that file. Otherwise, return null.
+   */
+  // @ts-expect-error
+  private async buildStaticUrl(file: string): string | null {
+    const queryParams = new URLSearchParams(document.location.search)
+    const staticAppId = queryParams.get("staticAppId")
+    if (staticAppId) {
+      const staticAssetUrl = await getStaticConfig()
+      return `${staticAssetUrl}/${staticAppId}${file}`
+    }
+    return null
+  }
+
+  /**
    * Construct a URL for a media file. If the url is relative and starts with
-   * "/media", assume it's being served from Streamlit and construct it
-   * appropriately. Otherwise leave it alone.
+   * "/media", check connection type - static connections will serve media from
+   * S3 - otherwise it's being served from Streamlit, construct it appropriately.
+   * Leave it alone if not starting with "/media".
    */
   public buildMediaURL(url: string): string {
-    return url.startsWith(MEDIA_ENDPOINT)
-      ? buildHttpUri(this.requireServerUri(), url)
-      : url
+    if (url.startsWith(MEDIA_ENDPOINT)) {
+      return (
+        this.buildStaticUrl(url) ?? buildHttpUri(this.requireServerUri(), url)
+      )
+    }
+    return url
   }
 
   /**
