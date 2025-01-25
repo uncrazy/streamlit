@@ -482,7 +482,11 @@ class ScriptRunner:
                 if is_mpa_v1:
                     pages = self._pages_manager.get_pages()
                     page = _navigation(
-                        [StreamlitPage(p["script_path"]) for p in pages.values()]
+                        [StreamlitPage(self._main_script_path, default=True)]
+                        + [
+                            StreamlitPage(p["script_path"], url_path=p["page_name"])
+                            for p in pages.values()
+                        ]
                     )
                 else:
                     page = StreamlitPage(self._main_script_path)
